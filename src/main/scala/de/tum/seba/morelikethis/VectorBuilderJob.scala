@@ -15,13 +15,9 @@ import scalaj.http._
 
 object VectorBuilderJob extends SparkJob {
 
-  val authUrl: String = "http://localhost:8083/intern/tricia/api/v1/jwt"
-  val wsUrl: String = "http://localhost:8083/intern/tricia/api/v1/workspaces"
-  val wsNwUrl: String = "http://localhost:8083/intern/tricia/api/v1/workspaces/northwind"
-  val entityTypNwUrl: String = "http://localhost:8083/intern/tricia/api/v1/workspaces/northwind/entityTypes"
-  val entitiesNwUrl: String = "http://localhost:8083/intern/tricia/api/v1/workspaces/northwind/entities"
-  val entityExNwUrl: String = "http://localhost:8083/intern/tricia/api/v1/entities/teatime"
-  val prodNwUrl: String = "http://localhost:8083/intern/tricia/api/v1/entityTypes/nwproduct"
+  val authUrl: String = "https://server.sociocortex.com/api/v1/jwt"
+  val entitiesNwUrl: String = "https://server.sociocortex.com/api/v1/workspaces/5f7u30lbgu35/entities"
+  val wsUrl: String = "https://server.sociocortex.com/api/v1/workspaces"
 
   def main(args: Array[String]) {
     val conf = new SparkConf().setMaster("local[4]").setAppName("VectorBuilderJob")
@@ -40,35 +36,64 @@ object VectorBuilderJob extends SparkJob {
 
   override def runJob(sc: SparkContext, config: Config): Any = {
 
-    val authResponse: HttpResponse[String] = Http(authUrl).postData("{\n \"username\":\"mustermann@test.sc\",\n \"password\":\"ottto\"\n}").header("content-type", "application/json").asString
+    var documentMap = scala.collection.mutable.Map.empty[String, String]
+
+    val authResponse: HttpResponse[String] = Http(authUrl).postData("{\n \"username\":\"ga89tok@mytum.de\",\n \"password\":\"123123\"\n}").header("content-type", "application/json").asString
     val authJson = Json.parse(authResponse.body)
     val token = authJson.at("/token").asText()
-    println(token)
 
-    // todo: loop all documents and get text content
-
-    val res: HttpResponse[String] = Http(entityExNwUrl).header("Authorization", "Bearer " + token).asString
+    val res: HttpResponse[String] = Http(entitiesNwUrl).header("Authorization", "Bearer " + token).asString
     val jsonValue2 = Json.parse(res.body)
-    var content = jsonValue2.at("/content").asText()
-    content = content.replaceAll("""<[^>]*>""", "")
-    content = content.replaceAll("""&nbsp;""", " ")
-    content = content.replaceAll("""\n""", " ")
-    content = content.replaceAll("""[^a-zA-Z ]""", "")
-    println(content)
+    val it = jsonValue2.elements()
 
-    val word2vec = new Word2Vec()
-    val input = sc.parallelize(content.split(" ")).map(line => line.split(" ").toSeq)
+    var wholeContent = ""
+    while (it.hasNext) {
+      val element = it.next()
+      val elementId = element.at("/id").asText()
+      val href = element.at("/href").asText()
+
+      val res: HttpResponse[String] = Http(href).header("Authorization", "Bearer " + token).asString
+      //      println(res.body)
+      val jsonValue2 = Json.parse(res.body)
+      var content = jsonValue2.at("/content").asText()
+      content = content.replaceAll("""<[^>]*>""", "")
+      content = content.replaceAll("""&nbsp;""", " ")
+      content = content.replaceAll("""\n""", " ")
+      content = content.replaceAll("""[^a-zA-Z ]""", "")
+      if (!content.isEmpty) {
+        println(elementId)
+        //        println(href)
+        //        println(content)
+        documentMap(elementId) = content
+        wholeContent = wholeContent.concat(content)
+      }
+    }
+    //    println(documentMap)
+
+    documentMap.foreach {
+      keyVal => println(keyVal._1 + "calculating doc vector")
+        println(keyVal._2.split(" +")) }
+
+    val conf = new SparkConf().setAppName("Word2VecExample").setMaster("local[2]")
+    val sc = new SparkContext(conf)
+
+    val word2vec = new Word2Vec().setMinCount(0).setVectorSize(100)
+    val input = sc.parallelize(wholeContent.split(" ")).map(line => line.split(" ").toSeq)
     println("parallelized ===============")
 
     val model = word2vec.fit(input)
     println("fitted ===============")
 
-    val synonyms = model.findSynonyms("cup", 5)
-    println("synonyms ===============")
+    val map = model.getVectors
+    val vec1 = map.get("relevance")
+    val vec2 = map.get("project")
+    println(vec1.map(_.mkString(" ")).mkString("\n"))
+    println(vec2.map(_.mkString(" ")).mkString("\n"))
+    var a = Array(vec1, vec2).flatten
+    var myres = a.transpose.map(_.sum)
+    println(myres.deep.mkString(" "))
 
-    for((synonym, cosineSimilarity) <- synonyms) {
-      println(s"$synonym $cosineSimilarity")
-    }
+
 
     // Save and load model
 //    model.save(sc, "myModelPath")
