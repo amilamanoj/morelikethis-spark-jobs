@@ -3,6 +3,7 @@ package de.tum.seba.morelikethis
 /**
   * Created by Prateek Bagrecha on 13.12.2016.
   */
+
 import akka.actor.Props
 import com.typesafe.config.{Config, ConfigFactory}
 import ooyala.common.akka.ActorStack
@@ -13,12 +14,29 @@ import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration._
 import scala.util.Try
 
+class Init {
+
+  def InitSparkContext: SparkContext = {
+    val conf = new SparkConf().setAppName("VecJobScheduler")
+      .setMaster("local[4]")
+    SparkContext.getOrCreate(conf)
+  }
+
+}
+
 class testActor extends ActorStack {
 
   override def wrappedReceive = {
-    case x: String => printf("Received String: " + x + "\n")
-    case y: Long => printf("Time Received: " + y + "\n")
-    case _ => printf("received unknown message" + "\n")
+    case "RunVectorBuildJob" =>
+      println("Actor: Received Message to Run Vector Build Job")
+      println("Actor: Creating/Geting Existing Spark Context")
+      val sc = new Init().InitSparkContext
+      println("................Triggering Vector Builder Job................")
+      VectorBuilderJob.runJob(sc, ConfigFactory.parseString("input.string = Run Vector Build Job "))
+    case y: Long =>
+      println("Actor: Time Received: " + y + "\n")
+    case _ =>
+      println("Actor: Received Unknown Message :" + _)
   }
 }
 
@@ -26,8 +44,7 @@ class testActor extends ActorStack {
 object SchedulerTest extends SparkJob {
 
   def main(args: Array[String]): Unit = {
-    val conf = new SparkConf().setMaster("local[3]").setAppName("SchedulerTest")
-    val sc = new SparkContext(conf)
+    val sc = new Init().InitSparkContext
     val config = ConfigFactory.parseString(args(0))
     println(config)
     val results = runJob(sc, config)
@@ -42,15 +59,20 @@ object SchedulerTest extends SparkJob {
 
   def runJob(sc: SparkContext, config: Config): Any = {
 
+    val sc_config = ConfigFactory.load("my.conf")
     val system = akka.actor.ActorSystem("system")
     val ta = system.actorOf(Props[testActor], name = "ta")
 
-    system.scheduler.schedule(50 milliseconds, 15 seconds) {
-      ta ! config.getString("input.string")
-    }
+    val delay = Duration(sc_config.getString("sc.run-job.delay")).asInstanceOf[FiniteDuration]
+    val frequency = Duration(sc_config.getString("sc.run-job.frequency")).asInstanceOf[FiniteDuration]
 
-    system.scheduler.schedule(50 milliseconds, 15 seconds) {
-      ta ! System.currentTimeMillis
+    system.scheduler.schedule(delay, frequency) {
+      println("Scheduler RunJob: Vector Calculation Job will been Scheduled")
+      println("Scheduler RunJob: Vector Calculation Job will run with ..")
+      println("Scheduler RunJob: Initial Delay: " + delay)
+      println("Scheduler RunJob: Frequency of Run: " + frequency)
+      println("Scheduler RunJob: Send Message to Run Vector Job")
+      ta ! config.getString("input.string")
     }
 
   }
