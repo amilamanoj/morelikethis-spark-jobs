@@ -37,6 +37,10 @@ object VectorBuilderJob extends SparkJob {
   override def runJob(sc: SparkContext, config: Config): Any = {
 
     var documentMap = scala.collection.mutable.Map.empty[String, String]
+    var docVectorMap = scala.collection.mutable.Map.empty[String, Array[Float]]
+
+    println("Fetching all documents of workspace...")
+    var startTime: Long = System.currentTimeMillis
 
     val authResponse: HttpResponse[String] = Http(authUrl).postData("{\n \"username\":\"ga89tok@mytum.de\",\n \"password\":\"123123\"\n}").header("content-type", "application/json").asString
     val authJson = Json.parse(authResponse.body)
@@ -53,7 +57,6 @@ object VectorBuilderJob extends SparkJob {
       val href = element.at("/href").asText()
 
       val res: HttpResponse[String] = Http(href).header("Authorization", "Bearer " + token).asString
-      //      println(res.body)
       val jsonValue2 = Json.parse(res.body)
       var content = jsonValue2.at("/content").asText()
       content = content.replaceAll("""<[^>]*>""", "")
@@ -61,38 +64,52 @@ object VectorBuilderJob extends SparkJob {
       content = content.replaceAll("""\n""", " ")
       content = content.replaceAll("""[^a-zA-Z ]""", "")
       if (!content.isEmpty) {
-        println(elementId)
-        //        println(href)
-        //        println(content)
+        print(elementId)
         documentMap(elementId) = content
         wholeContent = wholeContent.concat(content)
       }
     }
-    //    println(documentMap)
+    val fetchTime = System.currentTimeMillis - startTime
+    println()
+    println("Fetched " + documentMap.size + " documents of workspace in milliseconds: " + fetchTime)
 
-    documentMap.foreach {
-      keyVal => println(keyVal._1 + "calculating doc vector")
-        println(keyVal._2.split(" +")) }
-
-    val conf = new SparkConf().setAppName("Word2VecExample").setMaster("local[2]")
-    val sc = new SparkContext(conf)
+    println("Starting model fitting...")
+    startTime = System.currentTimeMillis
 
     val word2vec = new Word2Vec().setMinCount(0).setVectorSize(100)
     val input = sc.parallelize(wholeContent.split(" ")).map(line => line.split(" ").toSeq)
-    println("parallelized ===============")
 
     val model = word2vec.fit(input)
-    println("fitted ===============")
-
     val map = model.getVectors
-    val vec1 = map.get("relevance")
-    val vec2 = map.get("project")
-    println(vec1.map(_.mkString(" ")).mkString("\n"))
-    println(vec2.map(_.mkString(" ")).mkString("\n"))
-    var a = Array(vec1, vec2).flatten
-    var myres = a.transpose.map(_.sum)
-    println(myres.deep.mkString(" "))
 
+    val fitTime = System.currentTimeMillis - startTime
+    println("Fitted model in milliseconds: " + fitTime)
+
+    println("Calculating document vectors: ")
+    startTime = System.currentTimeMillis
+
+    documentMap.foreach {
+      keyVal =>
+        println("  Calculating vector for document: " + keyVal._1)
+        var docWords = keyVal._2.split(" +")
+        var vecArray2d = new Array[Array[Float]](docWords.length)
+
+
+        for (i <- docWords.indices) {
+          var word = docWords(i)
+          var wordVec = map.get(word)
+          if (wordVec.nonEmpty) {
+            vecArray2d(i) = wordVec.get
+          } else {
+            vecArray2d(i) = Array.fill[Float](100)(0)
+          }
+        }
+        var docVectorArr = vecArray2d.transpose.map(_.sum)
+        docVectorMap(keyVal._1) = docVectorArr
+    }
+
+    val docVecTime = System.currentTimeMillis - startTime
+    println("Finished calculating " + documentMap.size + " document vectors in milliseconds: " + docVecTime)
 
 
     // Save and load model
