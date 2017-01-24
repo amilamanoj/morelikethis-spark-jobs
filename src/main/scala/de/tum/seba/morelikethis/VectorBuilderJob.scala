@@ -9,6 +9,7 @@ import scala.util.Try
 import org.apache.spark.mllib.feature.{Word2Vec, Word2VecModel}
 import play.libs.Json
 
+import scala.collection.mutable
 import scala.concurrent.ExecutionContext.Implicits.global
 import scalaj.http.HttpResponse
 import scalaj.http._
@@ -38,6 +39,7 @@ object VectorBuilderJob extends SparkJob {
 
     var documentMap = scala.collection.mutable.Map.empty[String, String]
     var docVectorMap = scala.collection.mutable.Map.empty[String, Array[Float]]
+    var docSimilarityMap = scala.collection.mutable.Map.empty[String, scala.collection.mutable.Map[String, Double]]
 
     println("Fetching all documents of workspace...")
     var startTime: Long = System.currentTimeMillis
@@ -51,27 +53,34 @@ object VectorBuilderJob extends SparkJob {
     val it = jsonValue2.elements()
 
     var wholeContent = ""
+    var reqCount = 0
     while (it.hasNext) {
+      reqCount = reqCount + 1
       val element = it.next()
       val elementId = element.at("/id").asText()
       val href = element.at("/href").asText()
 
       val res: HttpResponse[String] = Http(href).header("Authorization", "Bearer " + token).asString
+      //    println(res.body)
       val jsonValue2 = Json.parse(res.body)
       var content = jsonValue2.at("/content").asText()
       content = content.replaceAll("""<[^>]*>""", "")
       content = content.replaceAll("""&nbsp;""", " ")
       content = content.replaceAll("""\n""", " ")
       content = content.replaceAll("""[^a-zA-Z ]""", "")
-      if (!content.isEmpty) {
-        print(elementId)
+      if (!content.trim.isEmpty) {
+        print(".")
+        //        print(elementId)
+        //        println(href)
+        //        println(content)
         documentMap(elementId) = content
         wholeContent = wholeContent.concat(content)
       }
     }
     val fetchTime = System.currentTimeMillis - startTime
     println()
-    println("Fetched " + documentMap.size + " documents of workspace in milliseconds: " + fetchTime)
+    println("Fetched " + documentMap.size + " non-empty documents out of " + reqCount + " total in milliseconds: " + fetchTime)
+    //        println(documentMap)
 
     println("Starting model fitting...")
     startTime = System.currentTimeMillis
@@ -90,12 +99,14 @@ object VectorBuilderJob extends SparkJob {
 
     documentMap.foreach {
       keyVal =>
-        println("  Calculating vector for document: " + keyVal._1)
+        //        println("  Calculating vector for document: " + keyVal._1)
+        print(".")
         var docWords = keyVal._2.split(" +")
         var vecArray2d = new Array[Array[Float]](docWords.length)
 
 
         for (i <- docWords.indices) {
+          //          println(s"$i is ${docWords(i)}")
           var word = docWords(i)
           var wordVec = map.get(word)
           if (wordVec.nonEmpty) {
@@ -105,16 +116,63 @@ object VectorBuilderJob extends SparkJob {
           }
         }
         var docVectorArr = vecArray2d.transpose.map(_.sum)
+        //        println(docVectorArr.deep.mkString(" "))
         docVectorMap(keyVal._1) = docVectorArr
     }
 
     val docVecTime = System.currentTimeMillis - startTime
+    println()
     println("Finished calculating " + documentMap.size + " document vectors in milliseconds: " + docVecTime)
+
+    println("Calculating similarity for " + docVectorMap.size * docVectorMap.size + " entries")
+    startTime = System.currentTimeMillis
+
+    docVectorMap.foreach {
+      keyValX =>
+        val similarityMapofX = scala.collection.mutable.Map.empty[String, Double]
+        docVectorMap.foreach {
+          keyValY =>
+            val similarity = cosineSimilarity(keyValX._2, keyValY._2)
+            //            println(keyValX._1 + "-" + keyValY._1 + ": " + similarity)
+            similarityMapofX(keyValY._1) = similarity
+        }
+        docSimilarityMap(keyValX._1) = mutable.ListMap(similarityMapofX.toList.sortBy{_._2}:_*)
+    }
+
+    val similarityTime = System.currentTimeMillis - startTime
+    println("Finished calculating similarity for " + docVectorMap.size * docVectorMap.size + " entries in milliseconds: " + similarityTime)
+    //    println()
+    //    println(docSimilarityMap)
 
 
     // Save and load model
 //    model.save(sc, "myModelPath")
 //    val sameModel = Word2VecModel.load(sc, "myModelPath")
+  }
+
+  /*
+* This method takes 2 equal length arrays of integers
+* It returns a double representing similarity of the 2 arrays
+* 0.9925 would be 99.25% similar
+* (x dot y)/||X|| ||Y||
+*/
+  def cosineSimilarity(x: Array[Float], y: Array[Float]): Double = {
+    require(x.size == y.size)
+    dotProduct(x, y)/(magnitude(x) * magnitude(y))
+  }
+  /*
+   * Return the dot product of the 2 arrays
+   * e.g. (a[0]*b[0])+(a[1]*a[2])
+   */
+  def dotProduct(x: Array[Float], y: Array[Float]): Float = {
+    (for((a, b) <- x zip y) yield a * b) sum
+  }
+  /*
+   * Return the magnitude of an array
+   * We multiply each element, sum it, then square root the result.
+   */
+  def magnitude(x: Array[Float]): Double = {
+    math.sqrt(x map(i => i*i) sum)
   }
 
 }
