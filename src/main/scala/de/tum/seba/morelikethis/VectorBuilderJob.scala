@@ -1,5 +1,7 @@
 package de.tum.seba.morelikethis
 
+import java.io.{File, PrintWriter}
+
 import com.typesafe.config.{Config, ConfigFactory}
 import org.apache.spark.SparkConf
 import org.apache.spark.SparkContext
@@ -17,8 +19,9 @@ import scalaj.http._
 object VectorBuilderJob extends SparkJob {
 
   val authUrl: String = "https://server.sociocortex.com/api/v1/jwt"
-  val entitiesNwUrl: String = "https://server.sociocortex.com/api/v1/workspaces/5f7u30lbgu35/entities"
+  val entitiesNwUrl: String = "https://server.sociocortex.com/api/v1/workspaces/"
   val wsUrl: String = "https://server.sociocortex.com/api/v1/workspaces"
+  val workspace = "5f7u30lbgu35"
 
   def main(args: Array[String]) {
     val conf = new SparkConf().setMaster("local[4]").setAppName("VectorBuilderJob")
@@ -39,7 +42,7 @@ object VectorBuilderJob extends SparkJob {
 
     var documentMap = scala.collection.mutable.Map.empty[String, String]
     var docVectorMap = scala.collection.mutable.Map.empty[String, Array[Float]]
-    var docSimilarityMap = scala.collection.mutable.Map.empty[String, scala.collection.mutable.Map[String, Double]]
+    var docSimilarityMap = scala.collection.mutable.Map.empty[String, String]
 
     println("Fetching all documents of workspace...")
     var startTime: Long = System.currentTimeMillis
@@ -48,7 +51,7 @@ object VectorBuilderJob extends SparkJob {
     val authJson = Json.parse(authResponse.body)
     val token = authJson.at("/token").asText()
 
-    val res: HttpResponse[String] = Http(entitiesNwUrl).header("Authorization", "Bearer " + token).asString
+    val res: HttpResponse[String] = Http(entitiesNwUrl + workspace + "/entities").header("Authorization", "Bearer " + token).asString
     val jsonValue2 = Json.parse(res.body)
     val it = jsonValue2.elements()
 
@@ -61,26 +64,43 @@ object VectorBuilderJob extends SparkJob {
       val href = element.at("/href").asText()
 
       val res: HttpResponse[String] = Http(href).header("Authorization", "Bearer " + token).asString
-      //    println(res.body)
       val jsonValue2 = Json.parse(res.body)
       var content = jsonValue2.at("/content").asText()
+
+      val itf = jsonValue2.at("/files").elements()
+      while (itf.hasNext) {
+        val fileEle = itf.next()
+        val fileName = fileEle.at("/name").asText()
+        if (fileName.endsWith("pdf")) {
+          val fileHref = fileEle.at("/href").asText()
+          val res: HttpResponse[String] = Http(fileHref).header("Authorization", "Bearer " + token).asString
+          val jsonValue3 = Json.parse(res.body)
+          val summary = jsonValue3.at("/summary").asText()
+          if (!summary.trim.isEmpty) {
+            content = content + " " + summary
+            print("-")
+          } else {
+            print("_")
+          }
+        }
+      }
+
       content = content.replaceAll("""<[^>]*>""", "")
       content = content.replaceAll("""&nbsp;""", " ")
       content = content.replaceAll("""\n""", " ")
       content = content.replaceAll("""[^a-zA-Z ]""", "")
+
       if (!content.trim.isEmpty) {
-        print(".")
-        //        print(elementId)
-        //        println(href)
-        //        println(content)
+        print(":")
         documentMap(elementId) = content
         wholeContent = wholeContent.concat(content)
+      } else {
+        print(".")
       }
     }
     val fetchTime = System.currentTimeMillis - startTime
     println()
     println("Fetched " + documentMap.size + " non-empty documents out of " + reqCount + " total in milliseconds: " + fetchTime)
-    //        println(documentMap)
 
     println("Starting model fitting...")
     startTime = System.currentTimeMillis
@@ -99,14 +119,11 @@ object VectorBuilderJob extends SparkJob {
 
     documentMap.foreach {
       keyVal =>
-        //        println("  Calculating vector for document: " + keyVal._1)
         print(".")
         var docWords = keyVal._2.split(" +")
         var vecArray2d = new Array[Array[Float]](docWords.length)
 
-
         for (i <- docWords.indices) {
-          //          println(s"$i is ${docWords(i)}")
           var word = docWords(i)
           var wordVec = map.get(word)
           if (wordVec.nonEmpty) {
@@ -116,7 +133,6 @@ object VectorBuilderJob extends SparkJob {
           }
         }
         var docVectorArr = vecArray2d.transpose.map(_.sum)
-        //        println(docVectorArr.deep.mkString(" "))
         docVectorMap(keyVal._1) = docVectorArr
     }
 
@@ -133,21 +149,35 @@ object VectorBuilderJob extends SparkJob {
         docVectorMap.foreach {
           keyValY =>
             val similarity = cosineSimilarity(keyValX._2, keyValY._2)
-            //            println(keyValX._1 + "-" + keyValY._1 + ": " + similarity)
-            similarityMapofX(keyValY._1) = similarity
+            if (keyValX._1 != keyValY._1 && !similarity.isNaN && similarity > 0) {
+              similarityMapofX(keyValY._1) = similarity
+            }
         }
-        docSimilarityMap(keyValX._1) = mutable.ListMap(similarityMapofX.toList.sortBy{_._2}:_*)
+        val sortedSimilarity = similarityMapofX.toList.sortBy(-_._2)
+        sortedSimilarity.foreach { f =>
+        }
+        val sItr = sortedSimilarity.iterator
+        var simStr = ""
+        while (sItr.hasNext) {
+          val tup = sItr.next()
+          val tupStr = tup._1 + ":" + "%1.4f".format(tup._2)
+          simStr = simStr + tupStr
+          if (sItr.hasNext) {
+            simStr = simStr + ","
+          }
+        }
+        docSimilarityMap(keyValX._1) = simStr
+
     }
 
     val similarityTime = System.currentTimeMillis - startTime
     println("Finished calculating similarity for " + docVectorMap.size * docVectorMap.size + " entries in milliseconds: " + similarityTime)
-    //    println()
-    //    println(docSimilarityMap)
 
+    var jsonSimMap = play.api.libs.json.Json.toJson(docSimilarityMap.toMap)
 
-    // Save and load model
-//    model.save(sc, "myModelPath")
-//    val sameModel = Word2VecModel.load(sc, "myModelPath")
+    val pw = new PrintWriter(new File(workspace + ".json"))
+    pw.write(play.api.libs.json.Json.stringify(jsonSimMap))
+    pw.close
   }
 
   /*
